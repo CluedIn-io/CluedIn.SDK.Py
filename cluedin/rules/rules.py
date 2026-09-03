@@ -48,7 +48,6 @@ def get_rules(context: Context, scope=RuleScope.DATA_PART, page_number=1) -> dic
                         isActive
                         createdBy
                         modifiedBy
-                        ownedBy
                         createdAt
                         modifiedAt
                         author {
@@ -58,6 +57,9 @@ def get_rules(context: Context, scope=RuleScope.DATA_PART, page_number=1) -> dic
                         }
                         scope
                         isReprocessing
+                        requiresAttention
+                        hasFailed
+                        affectedRecords
                         __typename
                     }
                     __typename
@@ -97,7 +99,6 @@ def get_rule(context: Context, rule_id: str) -> dict:
                     isActive
                     createdBy
                     modifiedBy
-                    ownedBy
                     createdAt
                     modifiedAt
                     condition
@@ -117,6 +118,8 @@ def get_rule(context: Context, rule_id: str) -> dict:
                     scope
                     isReprocessing
                     requiresAttention
+                    hasFailed
+                    affectedRecords
                     __typename
                 }
                 __typename

@@ -1,0 +1,39 @@
+mode: ContinuousDelivery
+branches:
+  main:
+    mode: ContinuousDelivery
+  develop:
+    label: alpha
+    # Do not track release branches, but rather look at the last merge commit
+    # when we got release branch merged into our branch and use it as a base
+    tracks-release-branches: false
+  release:
+    regex: ^releases?[\/-].*$
+    source-branches:
+      - main
+  support:
+    label: update
+    increment: None
+    source-branches:
+      - main
+  hotfix:
+    label: useBranchName
+  chore:
+    regex: ^chore?[\/-].*$
+    label: alpha.0.pr
+    source-branches:
+      - main
+  pull-request:
+    label: alpha.0.pr
+    increment: None
+  feature:
+    label: alpha.0.{BranchName}
+  unknown:
+    regex: ^(?!master$|main$|develop$|releases?[\/-]|chore[\/-]|support[\/-]|hotfix(es)?[\/-]|features?[\/-]|(pull|pull\-requests|pr)[\/-]).*$
+    label: alpha.0.{BranchName}
+    source-branches:
+    - develop
+    - main
+    - release
+    - support
+    - hotfix

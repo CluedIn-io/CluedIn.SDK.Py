@@ -1,14 +1,14 @@
 [tool.poetry]
 name = "cluedin"
-version = "3.0.0"
+version = "4.0.0"
 description = "CluedIn Python SDK"
-authors = ["Roman Klimenko <roman@klimenko.dk>"]
+authors = ["Roman Klimenko <roman@klimenko.dk>", "Martin Hyldahl"]
 readme = "cluedin/README.md"
 license = "MIT"
 keywords = ["cluedin", "mdm", "master data management"]
-maintainers = ["Roman Klimenko <roman@klimenko.dk>"]
-homepage = "https://github.com/romaklimenko/cluedin"
-repository = "https://github.com/romaklimenko/cluedin"
+maintainers = ["CluedIn"]
+homepage = "https://github.com/CluedIn-io/CluedIn.SDK.Py"
+repository = "https://github.com/CluedIn-io/CluedIn.SDK.Py"
 
 [tool.poetry.dependencies]
 python = "^3.10"

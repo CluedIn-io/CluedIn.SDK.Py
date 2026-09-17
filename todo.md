@@ -1,0 +1,193 @@
+# Power Fx rule execution — known gaps
+
+What is missing, unverified, or wrong in the Power Fx support added to
+`cluedin/rules/` (`powerfx.py`, `actions.py`, `processor.py`).
+
+The goal of that work is to run CluedIn rules outside CluedIn. Everything below
+is a way in which a rule that CluedIn executes may not execute here, or may
+execute differently. Each item says how it was established: **verified** means
+reproduced against this code, **unverified** means it depends on CluedIn
+behaviour we have not confirmed.
+
+Status: conditions and actions run for the rule shapes we have seen. The single
+real rule available while building this was
+`tests/fixtures/rules/powerfx.json`.
+
+---
+
+## 1. Correctness bugs
+
+These produce wrong output rather than an error, so they fail silently.
+
+- [ ] **`Text()` with a .NET numeric format returns garbage.** Verified:
+  `Text(1234.5, "0.00")` returns `'1e+03'`, because the format string is handed
+  to Python's `format()`, which reads `0.00` as its own spec. `Text(1234.5, "N2")`
+  returns `'1234.5'` — the exception path swallows it and falls back to plain
+  text. Date formats are translated properly; numeric ones are not. Either
+  implement the .NET numeric formats (`N`, `C`, `P`, `F`, `0.00`, `#,##0`) or
+  raise `PowerFxError` for a numeric format rather than emitting a wrong number.
+  See `format_value` in `powerfx.py`.
+
+- [ ] **`Value()` does not accept group separators.** Verified:
+  `Value("1,000")` raises. CluedIn properties arriving as formatted text will
+  fail a numeric comparison instead of comparing. Locale is also unhandled —
+  Power Fx reads `"1.000,50"` under a European locale.
+
+- [ ] **Text comparison case sensitivity is inconsistent within one rule.**
+  Verified: Power Fx `=` here is case-sensitive (`"ABC" = "abc"` is `False`),
+  matching real Power Fx, but the SDK's `Equals` operator
+  (`0bafc522-…`) is case-**in**sensitive. The same rule can therefore treat case
+  two different ways depending on which kind of condition is used. Confirm which
+  CluedIn applies to a Power Fx condition and align.
+
+## 2. Unverified assumptions
+
+Things built on inference that need checking against CluedIn before being
+trusted.
+
+- [ ] **`AddTag` and `RemoveVocabularyKey` as Formula Action statements are
+  guesses.** Only `SetVocabularyKeyValue` (from the real rule) and
+  `SetEntityProperty` (from the notebook) are confirmed. The other two are
+  plausible pairings. If CluedIn names them differently they are two lines each
+  in `ExpressionActionRuntime.call`. Get the real list of statement functions.
+
+- [ ] **`isActive` is ignored, on both the rule and its child processing rules.**
+  Verified: the real fixture's child processing rule has `"isActive": false`,
+  and its action is applied anyway. `RuleProcessor.is_active` is recorded and
+  never read. Establish what CluedIn does with an inactive child rule — this
+  currently applies actions CluedIn may not.
+
+- [ ] **Rule `order` is ignored.** Verified: `RuleProcessor.prepare` preserves
+  input order and does not sort by `order`. CluedIn applies rules in order, and
+  since actions mutate the record, order changes the result. Confirm and sort.
+
+- [ ] **Only the `Entity` scope is exercised.** The one real rule is
+  `scope: "Entity"`. `DataPart` and `Survivorship` rules may present a different
+  record shape (a data part is not a golden record) and different available
+  functions. Untested.
+
+- [ ] **Power Fx conditions are detected solely by
+  `objectTypeId == 96102979-e952-43d8-afe6-987676c0698b`.** This is from one
+  rule. If CluedIn uses other ids for other formula condition kinds, they will
+  fall through to `Rule(...)` and raise on the empty-GUID operator. See
+  `POWERFX_OBJECT_TYPE_ID` in `evaluator.py`.
+
+- [ ] **The rule `type` field is not applied to Power Fx conditions.** Ordinary
+  conditions typecast through `Rule.typecast_value`; a Power Fx condition has
+  `type: null` and its values are used as they arrive. Whether CluedIn coerces
+  vocabulary key types before a formula sees them is unknown.
+
+## 3. Missing Power Fx functions
+
+Verified by probing: every name below raises `Unsupported Power Fx function`.
+A rule using any of them cannot run here. Listed by how likely they are to turn
+up in a real CluedIn rule.
+
+- [ ] **Likely needed:** `IsMatch` (regex — CluedIn rules already have
+  match-pattern operators), `Switch`, `IfError`, `IsError`, `Find`,
+  `DateAdd`, `Year`, `Month`, `Day`, `Split`.
+- [ ] **Arithmetic:** `Sum`, `Max`, `Min`, `Average`, `Int`, `Trunc`, `Mod`,
+  `Power`, `Sqrt`, `Rand`.
+- [ ] **Date/time:** `Time`, `Hour`, `Minute`, `Second`, `Weekday`.
+- [ ] **Text:** `Char`, `EncodeUrl`, `Concat` (the table form, distinct from the
+  supported `Concatenate`).
+- [ ] **Type conversion:** `Boolean`, `JSON`.
+- [ ] **Table functions:** `Filter`, `Sort`, `ForAll`, `Search`, `First`, `Last`,
+  `Index`, `Distinct`, `Table`, `Shuffle`, `With`. These need a table/record
+  value model that does not exist here — a larger piece of work than the scalar
+  functions above, and only worth it if CluedIn rules actually use them.
+
+The supported set is declared in `PowerFxRuntime.FUNCTIONS` and verified to
+match what `call()` dispatches (checked; no drift today). There is no test
+enforcing that, so the two can drift — worth adding one.
+
+## 4. Missing Power Fx language features
+
+- [ ] **Bracket indexing.** Verified: `Entity.Properties["a.b"]` fails at the
+  lexer (`[` is not a token). Lower priority than it first looks — there are two
+  working ways to reach a dotted vocabulary key:
+  `GetVocabularyKeyValue(Entity,"a.b")` and the quoted name
+  `Entity.Properties.'a.b'` (both verified). Only add brackets if real rules use
+  that syntax.
+- [ ] **`ThisRecord`, `ThisItem`, `Self`.** Verified: rejected. Only names rooted
+  at `Entity` resolve.
+- [ ] **No error value model.** Power Fx has a first-class Error that flows
+  through an expression and is caught by `IfError`/`IsError`. Here an error is a
+  raised `PowerFxError`, catchable only by `IsBlankOrError`. Verified:
+  `1/0 = 1` raises rather than producing an error value.
+- [ ] **No named formulas, `Set`, `UpdateContext`, or variables.** Expression-only
+  by design; noted so the limit is explicit.
+
+## 5. CluedIn integration gaps
+
+- [ ] **`LoadEntityByEntityCode` has no built-in implementation.** It requires a
+  caller-supplied callback and otherwise raises. Since the SDK already has a
+  `Context` and GraphQL access, it could resolve entity codes against CluedIn
+  itself. This is probably the highest-value item here: it makes cross-entity
+  formulas work without the caller writing lookup plumbing.
+- [ ] **Entity metadata beyond properties is untested.** A formula may reference
+  `Entity.Codes`, `Entity.Tags`, `Entity.CreatedDate`, `Entity.Aliases`, or edges
+  (`OutgoingEdges`/`IncomingEdges`). Member access will return whatever the dict
+  happens to hold, or blank. No helpers, no fixtures, no tests.
+- [ ] **Unsupported action types are not enumerated.** Three are supported:
+  `SetValue`, `AddTag`, `ExpressionAction`. CluedIn has more, and we have no
+  list. Anything else raises `ActionError` and the rule is reported as skipped —
+  correct behaviour, but the coverage is unknown. Get the full action type list.
+- [ ] **No integration test against a live tenant.** All Power Fx tests are unit
+  tests over fixtures. The existing `@pytest.mark.integration` tests would be the
+  place for a real round-trip.
+
+## 6. Ergonomics and performance
+
+- [ ] **`explain()` output is not runnable when a rule uses Power Fx.** It emits
+  `@powerfx(<formula>)` inside the pandas query string. Deliberate — dropping the
+  condition would make the explanation quietly wrong — but it means the result
+  cannot be passed to `df.query`. A caller wanting a runnable query needs a way
+  to ask whether a rule is translatable. Consider a `can_explain()` predicate.
+- [ ] **`RuleProcessor.apply_all` deep-copies twice per rule per object.** Once
+  for the result and once per rule for atomicity. Fine for a notebook, wasteful
+  for a large batch. A copy-on-write or a rollback journal would avoid it.
+- [ ] **No vectorised path.** Rules are applied per object. There is no DataFrame
+  equivalent for Power Fx conditions, which is what `explain()` exists for with
+  ordinary conditions.
+
+## 7. Repository
+
+- [ ] **Version drift.** This repo (`CluedIn-io/CluedIn.SDK.Py`) is at **3.0.1**,
+  while the `cluedin` package on PyPI is at **4.0.1**, published from
+  `romaklimenko/cluedin`. This work sits on the older base. Resolve before
+  publishing, or the 4.0.x changes get clobbered.
+
+---
+
+## Not gaps — deliberate decisions
+
+Recorded so they are not "fixed" by mistake.
+
+- **The zip's `QueryBuilderEvaluator` was dropped.** It re-implemented AND/OR
+  traversal against string operator names (`equal`, `contains`) while this SDK
+  dispatches on CluedIn operator GUIDs. Keeping both would mean two evaluators
+  disagreeing about the same rule.
+- **Formulas are interpreted, never `eval`/`exec`'d.** Only whitelisted functions
+  are reachable. This is why adding a function is an explicit edit to `call()`
+  rather than a lookup into Python's namespace.
+- **`Evaluator`'s public API is unchanged.** Power Fx conditions are routed
+  inside it, so existing callers keep working.
+
+## Fixed in the source library
+
+Bugs found in `powerfx_querybuilder.zip` and corrected while merging it, listed
+in case that library is used elsewhere.
+
+- `-` was in the identifier lexer pattern, so `Len("a")-1` lexed as one name.
+- `Not(x)`, `And(...)`, `Or(...)` raised "Unsupported function" despite the
+  README claiming support.
+- `If` evaluated both branches, so `If(IsBlank(x), "", 1/x)` threw on the
+  untaken branch.
+- Ordering comparisons against blanks raised a raw Python `TypeError`.
+- `Text(d, "dd MMM yyyy")` corrupted month names — sequential replacement turned
+  `MMM` into `%mM`.
+- `in` was case-sensitive; real Power Fx `in` is not, and `exactin` is the
+  case-sensitive form.
+- `StartsWith`/`EndsWith` were case-sensitive; `Len` failed on non-text;
+  `DateValue` returned a datetime rather than a date.

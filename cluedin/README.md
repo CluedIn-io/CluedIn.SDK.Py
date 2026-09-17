@@ -227,6 +227,102 @@ You can add custom operations (see `test_operators.py` for examples), but the fo
 - `Not In`
 - `Does not match pattern`
 
+#### Power Fx
+
+CluedIn rules can express a condition as a Power Fx formula instead of a field/operator/value
+triple, and can use a Formula Action to modify a record. Both run outside CluedIn, so a rule can
+be evaluated and applied locally, against a `dict`, a batch, or a DataFrame row.
+
+Formulas are parsed into an AST and interpreted. They are never passed to `eval` or `exec`, and
+only the functions listed below are reachable, so rules authored by other people stay contained.
+
+A Power Fx condition needs no special handling – `Evaluator` recognizes it by its `objectTypeId`
+and evaluates it alongside the ordinary conditions in the same rule:
+
+```python
+rule = cluedin.rules.get_rule(context, rule_id)
+evaluator = cluedin.rules.Evaluator(rule['data']['management']['rule']['condition'])
+
+evaluator.object_matches_rules({
+    'entityType': '/DPerson',
+    'golden.person.firstName': 'Smith',
+    'golden.person.lastName': 'Smith'
+})
+```
+
+`Evaluator.explain()` cannot translate a formula into a pandas query, so it emits it as
+`@powerfx(<formula>)`. A query containing that is not runnable – it is there so the explanation
+does not silently drop a condition.
+
+To also apply a rule's actions, use `RuleProcessor`:
+
+```python
+rules = [cluedin.rules.get_rule(context, rule_id) for rule_id in rule_ids]
+
+processors, skipped = cluedin.rules.RuleProcessor.prepare(rules)
+
+for rule in skipped:
+    print(f'SKIPPED: {rule["name"]} -> {rule["reason"]}')
+
+result = cluedin.rules.RuleProcessor.apply_all(obj, processors)
+```
+
+- `cluedin.rules.RuleProcessor(rule, get_action=default_get_action, evaluator_kwargs=None, **runtime_kwargs)` – an executable rule: a condition plus the actions to apply to the objects that satisfy it. Accepts a `get_rule` response or the rule model inside it.
+  - `matches(obj) -> bool` – returns `True` if an object satisfies the rule's condition.
+  - `apply(obj) -> obj` – applies the rule's actions to an object, in place, if it matches.
+  - `actions -> list` – every action callable in the rule.
+  - `RuleProcessor.prepare(rules, **kwargs) -> (processors, skipped)` – builds a processor per rule that can be executed here, and reports the rest as `{'id', 'name', 'reason'}`.
+  - `RuleProcessor.apply_all(obj, processors, on_error=None) -> obj` – applies rules to a copy of an object. Each rule is atomic: if one raises, its changes are discarded and the rest still run.
+- `cluedin.rules.processor.describe_unsupported(rule) -> list` – lists the action types in a rule that this SDK cannot execute.
+
+##### Power Fx API
+
+- `cluedin.rules.evaluate_powerfx(formula, entity, get_value=None, load_entity_by_code=None) -> Any` – evaluates a formula against an entity.
+- `cluedin.rules.matches_powerfx(formula, entity, ...) -> bool` – evaluates a formula as a predicate.
+- `cluedin.rules.compile_powerfx(formula) -> CompiledPowerFx` – parses a formula once for reuse across many entities. Results are cached.
+- `cluedin.rules.PowerFxError` – raised when a formula cannot be parsed or evaluated.
+- `cluedin.rules.get_powerfx_formula(rule_object) -> str` – returns a condition's formula, or `None` if it is not a Power Fx condition.
+
+`get_value` is `(key, entity) -> value`, used by `GetVocabularyKeyValue`. By default a key is read
+from the entity's `Properties` mapping, then from the entity itself, so both the CluedIn shape and
+the flattened shape of `cluedin.gql.entries(flat=True)` work. `Evaluator` passes its own
+`get_property_name`/`get_value` through, so a custom field mapping also applies inside formulas.
+
+`load_entity_by_code` is `(code) -> entity`, used by `LoadEntityByEntityCode`. Without it, a
+formula calling that function raises `PowerFxError` rather than silently returning blank.
+
+Supported in a formula:
+
+- literals: text, numbers, `true`, `false`, `Blank()`
+- `Entity`, `Entity.Name`, nested members, and `'quoted names'`
+- operators: `=`, `<>`, `<`, `<=`, `>`, `>=`, `+`, `-`, `*`, `/`, `&`, `in`, `exactin`, `And`/`&&`, `Or`/`||`, `Not`/`!`
+- functions: `Abs`, `And`, `Blank`, `Coalesce`, `Concatenate`, `CountRows`, `DateDiff`, `DateTimeValue`, `DateValue`, `EndsWith`, `GetVocabularyKeyValue`, `If`, `IsBlank`, `IsBlankOrError`, `IsEmpty`, `Left`, `Len`, `LoadEntityByEntityCode`, `Lower`, `Mid`, `Not`, `Now`, `Or`, `Proper`, `Replace`, `Right`, `Round`, `StartsWith`, `Substitute`, `Text`, `Today`, `Trim`, `Upper`, `Value`
+
+A vocabulary key holding several values compares with ANY semantics, except `<>`, which holds only
+if every value differs. `If`, `And`, `Or` and `Coalesce` evaluate their arguments lazily, as Power
+Fx does. Anything outside this subset raises `PowerFxError`.
+
+#### Actions
+
+- `cluedin.rules.default_get_action(action_json, **runtime_kwargs) -> callable` – translates a rule action into `(obj) -> obj`. Raises `ActionError` for an action type that is not supported.
+- `cluedin.rules.iter_actions(rule_model)` – yields every action in a rule. A rule's actions live on its child processing rules, not on the rule itself.
+- `cluedin.rules.CompiledExpressionAction(expression)` – parses a Formula Action's `;`-separated Power Fx statements. `apply(obj, **runtime_kwargs) -> obj` runs them.
+- `cluedin.rules.ActionError` – raised when an action cannot be translated or applied.
+
+Supported action types:
+
+- `CluedIn.Rules.Actions.SetValue` – sets a property to a constant.
+- `CluedIn.Rules.Actions.AddTag` – appends to the object's `tags` list.
+- `CluedIn.Rules.Actions.ExpressionAction` – runs a Formula Action, for example
+  `SetVocabularyKeyValue(Entity,"golden.person.firstName","New Name")`. Statement functions:
+  `SetVocabularyKeyValue`, `SetEntityProperty`, `RemoveVocabularyKey`, `AddTag`. Their value
+  arguments are ordinary Power Fx expressions, so an action can read the entity it is modifying.
+
+Writes go through `set_value` (`(key, value, obj) -> None`) and `add_tag` (`(tag, obj) -> None`),
+both overridable via `runtime_kwargs`. By default a key is written to the object's `Properties`
+mapping if it has one, and as a top-level key otherwise. To support an action type this SDK does
+not, pass your own `get_action` to `RuleProcessor` and fall back to `default_get_action`.
+
 ### Vocabulary
 
 - `cluedin.vocab.get_vocab_keys(context: Context) -> list` – gets all vocabulary keys.

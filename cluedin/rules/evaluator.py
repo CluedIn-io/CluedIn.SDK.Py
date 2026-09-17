@@ -1,9 +1,36 @@
 import json
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 from .operators import default_get_operator, pandas_get_operator
+from .powerfx import get_member as powerfx_get_member
+from .powerfx import matches_powerfx
 from .rule import Rule
 from .rule_group import RuleGroup
+
+# CluedIn identifies a Power Fx condition by its objectTypeId. Such a condition
+# carries no field and its operator is the empty GUID, so it cannot be told
+# apart from a malformed ordinary condition by any other means.
+POWERFX_OBJECT_TYPE_ID = '96102979-e952-43d8-afe6-987676c0698b'
+
+
+def get_powerfx_formula(rule_object: dict) -> Optional[str]:
+    """
+    Returns the Power Fx formula of a condition, if it is a Power Fx condition.
+
+    Args:
+        rule_object (dict): A condition from a rule's `condition` tree.
+
+    Returns:
+        str: The formula, or None if this is not a Power Fx condition.
+    """
+    if str(rule_object.get('objectTypeId', '')).lower() != POWERFX_OBJECT_TYPE_ID:
+        return None
+    value = rule_object.get('value')
+    if isinstance(value, list):
+        value = value[0] if value else None
+    if value is None or not str(value).strip():
+        return None
+    return str(value)
 
 
 def default_get_property_name(field: Optional[str]) -> Optional[str]:
@@ -53,6 +80,9 @@ class Evaluator:
             on the field ID. Defaults to default_get_property_name.
         get_value (function, optional): A function that returns the value based on the property
             name and the object. Defaults to default_get_value.
+        load_entity_by_code (function, optional): A function that loads an entity by its entity
+            code, used by the Power Fx `LoadEntityByEntityCode` function. Without it, a formula
+            calling that function raises PowerFxError.
 
     Attributes:
         rule_group (RuleGroup): The rule group representing the rule set.
@@ -72,10 +102,12 @@ class Evaluator:
         get_operator=default_get_operator,
         get_property_name=default_get_property_name,
         get_value=default_get_value,
+        load_entity_by_code=None,
     ):
         self.get_operator = get_operator
         self.get_property_name = get_property_name
         self.get_value = get_value
+        self.load_entity_by_code = load_entity_by_code
         if isinstance(rule_set, str):
             self.rule_group = RuleGroup(json.loads(rule_set))
         else:
@@ -152,6 +184,50 @@ class Evaluator:
             obj,
         )
 
+    def powerfx_get_value(self, key: str, entity) -> Any:
+        """
+        Reads a vocabulary key for the Power Fx `GetVocabularyKeyValue`
+        function, so that a formula sees the same fields as the rest of the
+        rule, including any custom `get_property_name`/`get_value`.
+
+        Args:
+            key (str): The vocabulary key.
+            entity: The entity to read from.
+
+        Returns:
+            Any: The value, or None if the key is not set.
+        """
+        try:
+            value = self.get_value(self.get_property_name(key), entity)
+        except (AttributeError, TypeError):
+            value = None
+        if value is not None:
+            return value
+        # Fall back to the CluedIn shape, where vocabulary keys sit under
+        # Properties rather than at the top level.
+        properties = powerfx_get_member(entity, 'Properties')
+        if isinstance(properties, Mapping):
+            return powerfx_get_member(properties, key)
+        return None
+
+    def __evaluate_powerfx(self, formula: str, obj) -> bool:
+        """
+        Evaluates a Power Fx condition against an object.
+
+        Args:
+            formula (str): The Power Fx formula.
+            obj: The object to evaluate the formula against.
+
+        Returns:
+            bool: True if the formula holds for the object.
+        """
+        return matches_powerfx(
+            formula,
+            obj,
+            get_value=self.powerfx_get_value,
+            load_entity_by_code=self.load_entity_by_code,
+        )
+
     def __evaluate_rule_object(self, rule_object: dict, obj) -> bool:
         """
         Evaluates a rule object against the given object.
@@ -165,6 +241,9 @@ class Evaluator:
         """
         if "rules" in rule_object and len(rule_object["rules"]) > 0:
             return self.__evaluate_rule_group(RuleGroup(rule_object), obj)
+        formula = get_powerfx_formula(rule_object)
+        if formula is not None:
+            return self.__evaluate_powerfx(formula, obj)
         return self.__evaluate_rule(Rule(rule_object), obj)
 
     def __explain_rule_object(self, rule_object):
@@ -179,6 +258,12 @@ class Evaluator:
         """
         if "rules" in rule_object and len(rule_object["rules"]) > 0:
             return self.__explain_rule_group(RuleGroup(rule_object))
+        formula = get_powerfx_formula(rule_object)
+        if formula is not None:
+            # A Power Fx formula has no pandas equivalent. Emit it verbatim so
+            # the explanation stays complete and visibly not runnable, rather
+            # than silently dropping a condition from the query.
+            return f'@powerfx({formula})'
         return self.__explain_rule(Rule(rule_object))
 
     def __explain_rule(self, rule):

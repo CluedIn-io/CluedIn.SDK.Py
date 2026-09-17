@@ -17,15 +17,33 @@ Anything else raises `PowerFxError`.
 
 from __future__ import annotations
 
+import calendar
+import math
 import re
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from functools import lru_cache
 from typing import Any, Callable, Mapping, Optional
+from urllib.parse import quote
 
 
 class PowerFxError(ValueError):
     """Raised when a Power Fx formula cannot be parsed or evaluated."""
+
+
+def _days_in_month(year: int, month: int) -> int:
+    """
+    Returns the number of days in a month, so DateAdd can clamp to it.
+
+    Args:
+        year (int): The year.
+        month (int): The month.
+
+    Returns:
+        int: The last day of that month.
+    """
+    return calendar.monthrange(year, month)[1]
 
 
 # ---------------------------------------------------------------------------
@@ -474,6 +492,11 @@ def to_number(value: Any):
     """
     Coerces a value to a number. `Blank()` and empty text are 0.
 
+    Text is read with the invariant conventions: `,` groups thousands, `.` is
+    the decimal separator, a trailing `%` divides by 100, and a value wrapped
+    in parentheses is negative. Locales that swap `,` and `.` are not
+    supported – `"1.000,50"` reads as 1.0, not 1000.5.
+
     Args:
         value: The value to coerce.
 
@@ -489,14 +512,63 @@ def to_number(value: Any):
         return 1 if value else 0
     if isinstance(value, (int, float)):
         return value
+
     text = str(value).strip()
+    original = text
+
+    # Accounting-style negatives: (1,234.50) is -1234.50.
+    negative = False
+    if len(text) > 1 and text.startswith('(') and text.endswith(')'):
+        negative = True
+        text = text[1:-1].strip()
+
+    percent = text.endswith('%')
+    if percent:
+        text = text[:-1].strip()
+
+    # Group separators, but only where they actually separate groups, so that
+    # a decimal comma is not silently swallowed.
+    if _GROUPED_NUMBER_RE.fullmatch(text):
+        text = text.replace(',', '')
+
     try:
-        return int(text)
+        number = int(text)
     except ValueError:
         try:
-            return float(text)
+            number = float(text)
         except ValueError as exc:
-            raise PowerFxError(f'Value {value!r} is not numeric') from exc
+            raise PowerFxError(f'Value {original!r} is not numeric') from exc
+
+    if percent:
+        number = number / 100
+    return -number if negative else number
+
+
+_GROUPED_NUMBER_RE = re.compile(r'[+-]?\d{1,3}(?:,\d{3})+(?:\.\d+)?')
+
+
+def round_half_up(value: float, digits: int = 0):
+    """
+    Rounds half away from zero, as Power Fx and .NET do.
+
+    Python's built-in `round` rounds half to even, so `round(2.5)` is 2 where
+    Power Fx `Round(2.5)` is 3.
+
+    Args:
+        value (float): The number to round.
+        digits (int, optional): Decimal places. Defaults to 0.
+
+    Returns:
+        int or float: The rounded value; an int when rounding to whole numbers.
+    """
+    quantum = Decimal(1).scaleb(-digits)
+    try:
+        rounded = Decimal(str(value)).quantize(quantum, rounding=ROUND_HALF_UP)
+    except InvalidOperation as exc:
+        raise PowerFxError(f'Cannot round {value!r} to {digits} places') from exc
+    if digits <= 0:
+        return int(rounded)
+    return float(rounded)
 
 
 def to_text(value: Any) -> str:
@@ -513,6 +585,9 @@ def to_text(value: Any) -> str:
         return ''
     if isinstance(value, bool):
         return 'true' if value else 'false'
+    if isinstance(value, float) and value.is_integer() and abs(value) < 1e16:
+        # Power Fx has one number type, so 2.0 reads back as "2", not "2.0".
+        return str(int(value))
     return str(value)
 
 
@@ -669,10 +744,139 @@ def format_value(value: Any, fmt: Optional[str] = None) -> str:
         for token, py in placeholders.items():
             pattern = pattern.replace(token, py)
         return value.strftime(pattern)
-    try:
-        return format(value, fmt)
-    except (TypeError, ValueError):
-        return to_text(value)
+    return format_number(to_number(value), fmt)
+
+
+_STANDARD_NUMBER_RE = re.compile(r'^([NnFfPpEeGgDdXx])(\d*)$')
+
+
+def _group_digits(digits: str) -> str:
+    """
+    Inserts `,` every three digits from the right.
+
+    Args:
+        digits (str): The integer digits.
+
+    Returns:
+        str: The grouped digits.
+    """
+    out = []
+    for index, digit in enumerate(reversed(digits)):
+        if index and index % 3 == 0:
+            out.append(',')
+        out.append(digit)
+    return ''.join(reversed(out))
+
+
+def _format_custom_number(number: float, fmt: str) -> str:
+    """
+    Applies a custom .NET numeric pattern built from `#`, `0`, `,` and `.`,
+    such as `0.00` or `#,##0.00`.
+
+    Args:
+        number (float): The number to format.
+        fmt (str): The pattern.
+
+    Returns:
+        str: The formatted number.
+
+    Raises:
+        PowerFxError: If the pattern uses anything else.
+    """
+    integer_pattern, _, fraction_pattern = fmt.partition('.')
+
+    if any(c not in '#0,' for c in integer_pattern) \
+            or any(c not in '#0' for c in fraction_pattern):
+        raise PowerFxError(f'Unsupported numeric format: {fmt!r}')
+
+    decimals = len(fraction_pattern)
+    required_decimals = fraction_pattern.count('0')
+    required_integers = integer_pattern.count('0')
+
+    negative = number < 0
+    text = f'{abs(round_half_up(number, decimals)):.{decimals}f}'
+    integer_digits, _, fraction_digits = text.partition('.')
+
+    # `#` marks an optional digit, so drop trailing zeros it did not require.
+    while len(fraction_digits) > required_decimals \
+            and fraction_digits.endswith('0'):
+        fraction_digits = fraction_digits[:-1]
+
+    integer_digits = integer_digits.lstrip('0')
+    if len(integer_digits) < required_integers:
+        integer_digits = integer_digits.rjust(required_integers, '0')
+    if not integer_digits and not fraction_digits:
+        integer_digits = '0'
+
+    if ',' in integer_pattern:
+        integer_digits = _group_digits(integer_digits)
+
+    out = integer_digits
+    if fraction_digits:
+        out = f'{out}.{fraction_digits}'
+    # -0 is 0.
+    return f'-{out}' if negative and float(text) else out
+
+
+def format_number(number: float, fmt: str) -> str:
+    """
+    Implements the .NET numeric format strings Power Fx `Text()` accepts.
+
+    Standard specifiers `N`, `F`, `P`, `E`, `G`, `D` and `X` are supported,
+    each with an optional precision, as are custom patterns built from `#`,
+    `0`, `,` and `.`. Anything else raises rather than returning a number that
+    does not match what was asked for.
+
+    Args:
+        number (float): The number to format.
+        fmt (str): The format string.
+
+    Returns:
+        str: The formatted number.
+
+    Raises:
+        PowerFxError: If the format is not supported.
+    """
+    standard = _STANDARD_NUMBER_RE.match(fmt)
+    if standard:
+        specifier = standard.group(1).upper()
+        precision = int(standard.group(2)) if standard.group(2) else None
+
+        if specifier == 'N':
+            return _format_custom_number(
+                number, '#,##0.' + '0' * (2 if precision is None else precision)
+                if (precision is None or precision > 0) else '#,##0')
+        if specifier == 'F':
+            return f'{number:.{2 if precision is None else precision}f}'
+        if specifier == 'P':
+            digits = 2 if precision is None else precision
+            return _format_custom_number(
+                number * 100,
+                '#,##0.' + '0' * digits if digits else '#,##0') + '%'
+        if specifier == 'E':
+            digits = 6 if precision is None else precision
+            return f'{number:.{digits}E}'
+        if specifier == 'G':
+            return to_text(number)
+        if specifier == 'D':
+            # D is integer-only in .NET, zero padded to the given width.
+            integer = int(number)
+            width = 0 if precision is None else precision
+            return f'-{abs(integer):0{width}d}' if integer < 0 \
+                else f'{integer:0{width}d}'
+        if specifier == 'X':
+            integer = int(number)
+            width = 0 if precision is None else precision
+            digits = f'{abs(integer):0{width}X}'
+            return f'-{digits}' if integer < 0 else digits
+
+    if fmt and all(c in '#0,.' for c in fmt):
+        return _format_custom_number(number, fmt)
+
+    raise PowerFxError(
+        f'Unsupported numeric format: {fmt!r}. Supported are N, F, P, E, G, '
+        'D and X with an optional precision, and custom patterns of #, 0, '
+        ', and .')
 
 
 # ---------------------------------------------------------------------------
@@ -694,12 +898,16 @@ class PowerFxRuntime:
     """
 
     FUNCTIONS = (
-        'Abs', 'And', 'Blank', 'Coalesce', 'Concatenate', 'CountRows',
-        'DateDiff', 'DateTimeValue', 'DateValue', 'EndsWith',
-        'GetVocabularyKeyValue', 'If', 'IsBlank', 'IsBlankOrError', 'IsEmpty',
-        'Left', 'Len', 'LoadEntityByEntityCode', 'Lower', 'Mid', 'Not', 'Now',
-        'Or', 'Proper', 'Replace', 'Right', 'Round', 'StartsWith', 'Substitute',
-        'Text', 'Today', 'Trim', 'Upper', 'Value',
+        'Abs', 'And', 'Average', 'Blank', 'Boolean', 'Char', 'Coalesce',
+        'Concatenate', 'CountRows', 'DateAdd', 'DateDiff', 'DateTimeValue',
+        'DateValue', 'Day', 'EncodeUrl', 'EndsWith', 'Find',
+        'GetVocabularyKeyValue', 'Hour', 'If', 'IfError', 'Int', 'IsBlank',
+        'IsBlankOrError', 'IsEmpty', 'IsError', 'IsMatch', 'Left', 'Len',
+        'LoadEntityByEntityCode', 'Lower', 'Max', 'Mid', 'Min', 'Minute',
+        'Mod', 'Month', 'Not', 'Now', 'Or', 'Power', 'Proper', 'Replace',
+        'Right', 'Round', 'Second', 'Split', 'Sqrt', 'StartsWith',
+        'Substitute', 'Sum', 'Switch', 'Text', 'Today', 'Trim', 'Trunc',
+        'Upper', 'Value', 'Weekday', 'Year',
     )
 
     def __init__(
@@ -889,6 +1097,17 @@ class PowerFxRuntime:
             except PowerFxError:
                 return True
             return value is None or value == ''
+        if name == 'iserror':
+            self.expects(node.name, node.args, 1)
+            try:
+                self.evaluate(node.args[0])
+            except PowerFxError:
+                return True
+            return False
+        if name == 'iferror':
+            return self.call_if_error(node.args)
+        if name == 'switch':
+            return self.call_switch(node.args)
 
         return self.call(node.name, [self.evaluate(arg) for arg in node.args])
 
@@ -915,6 +1134,69 @@ class PowerFxRuntime:
                 return self.evaluate(args[index + 1])
             index += 2
         # A trailing odd argument is the else branch.
+        if index < len(args):
+            return self.evaluate(args[index])
+        return None
+
+    def call_if_error(self, args: tuple) -> Any:
+        """
+        Implements `IfError(value, fallback, [value2, fallback2, ...], [else])`,
+        returning the first value that evaluates without error.
+
+        This engine raises on an error rather than carrying a Power Fx error
+        value, so the error is caught here instead of flowing through the
+        expression.
+
+        Args:
+            args (tuple): The unevaluated argument nodes.
+
+        Returns:
+            Any: The first value that evaluated, or the trailing else branch.
+
+        Raises:
+            PowerFxError: If fewer than two arguments were given, or if the
+                last fallback itself errors.
+        """
+        if len(args) < 2:
+            raise PowerFxError(
+                f'IfError expects at least 2 arguments, got {len(args)}')
+        index = 0
+        while index + 1 < len(args):
+            try:
+                return self.evaluate(args[index])
+            except PowerFxError:
+                pass
+            # An odd trailing argument is the else branch, so only take this
+            # fallback when it is the last pair.
+            if index + 3 > len(args):
+                return self.evaluate(args[index + 1])
+            index += 2
+        return self.evaluate(args[index]) if index < len(args) else None
+
+    def call_switch(self, args: tuple) -> Any:
+        """
+        Implements `Switch(value, match1, result1, ..., [default])`, evaluating
+        only the branch that is taken.
+
+        Args:
+            args (tuple): The unevaluated argument nodes.
+
+        Returns:
+            Any: The matching result, the default, or None.
+
+        Raises:
+            PowerFxError: If fewer than three arguments were given.
+        """
+        if len(args) < 3:
+            raise PowerFxError(
+                f'Switch expects at least 3 arguments, got {len(args)}')
+        value = self.evaluate(args[0])
+        index = 1
+        while index + 1 < len(args):
+            if compare(value, self.evaluate(args[index]), '='):
+                return self.evaluate(args[index + 1])
+            index += 2
+        # A trailing odd argument is the default.
         if index < len(args):
             return self.evaluate(args[index])
         return None
@@ -1034,7 +1316,7 @@ class PowerFxRuntime:
         if key == 'round':
             self.expects(name, args, (1, 2))
             digits = int(to_number(args[1])) if len(args) == 2 else 0
-            return round(to_number(args[0]), digits)
+            return round_half_up(to_number(args[0]), digits)
 
         if key == 'datevalue':
             self.expects(name, args, 1)
@@ -1061,6 +1343,93 @@ class PowerFxRuntime:
             if args[0] is None:
                 return 0
             return len(args[0]) if isinstance(args[0], (list, tuple)) else 1
+
+        if key == 'ismatch':
+            self.expects(name, args, (2, 3))
+            return self.is_match(
+                to_text(args[0]), to_text(args[1]),
+                to_text(args[2]) if len(args) == 3 else '')
+        if key == 'find':
+            self.expects(name, args, (2, 3))
+            start = max(int(to_number(args[2])) - 1, 0) if len(args) == 3 else 0
+            found = to_text(args[1]).find(to_text(args[0]), start)
+            # Power Fx returns Blank() when the text is not found, and its
+            # string positions are 1-based.
+            return None if found < 0 else found + 1
+        if key == 'split':
+            self.expects(name, args, 2)
+            separator = to_text(args[1])
+            text = to_text(args[0])
+            # A real Power Fx Split returns a single-column table. This engine
+            # has no table type, so it returns a list, which comparisons and
+            # CountRows already understand.
+            return list(text) if not separator else text.split(separator)
+
+        if key == 'dateadd':
+            self.expects(name, args, (2, 3))
+            return self.date_add(
+                to_date(args[0]), int(to_number(args[1])),
+                to_text(args[2]).lower() if len(args) == 3 else 'days')
+        if key in ('year', 'month', 'day', 'hour', 'minute', 'second',
+                   'weekday'):
+            self.expects(name, args, (1, 2) if key == 'weekday' else 1)
+            return self.date_part(key, args)
+
+        if key in ('sum', 'max', 'min', 'average'):
+            values = [to_number(x) for x in flatten(list(args))
+                      if x is not None and x != '']
+            if not values:
+                return 0 if key == 'sum' else None
+            if key == 'sum':
+                return sum(values)
+            if key == 'max':
+                return max(values)
+            if key == 'min':
+                return min(values)
+            return sum(values) / len(values)
+        if key == 'int':
+            self.expects(name, args, 1)
+            return math.floor(to_number(args[0]))
+        if key == 'trunc':
+            self.expects(name, args, (1, 2))
+            if len(args) == 2:
+                digits = int(to_number(args[1]))
+                factor = 10 ** digits
+                return math.trunc(to_number(args[0]) * factor) / factor
+            return math.trunc(to_number(args[0]))
+        if key == 'mod':
+            self.expects(name, args, 2)
+            divisor = to_number(args[1])
+            if divisor == 0:
+                raise PowerFxError('Mod by zero')
+            # Power Fx follows Excel: the result takes the divisor's sign,
+            # which is what Python's % already does.
+            return to_number(args[0]) % divisor
+        if key == 'power':
+            self.expects(name, args, 2)
+            try:
+                return to_number(args[0]) ** to_number(args[1])
+            except (OverflowError, ZeroDivisionError) as exc:
+                raise PowerFxError(f'Power is out of range: {exc}') from exc
+        if key == 'sqrt':
+            self.expects(name, args, 1)
+            number = to_number(args[0])
+            if number < 0:
+                raise PowerFxError('Sqrt of a negative number')
+            return math.sqrt(number)
+
+        if key == 'char':
+            self.expects(name, args, 1)
+            code = int(to_number(args[0]))
+            if not 0 < code < 0x110000:
+                raise PowerFxError(f'Char is out of range: {code}')
+            return chr(code)
+        if key == 'encodeurl':
+            self.expects(name, args, 1)
+            return quote(to_text(args[0]), safe='')
+        if key == 'boolean':
+            self.expects(name, args, 1)
+            return self.to_boolean(args[0])
 
         if key == 'loadentitybyentitycode':
             self.expects(name, args, 1)
@@ -1093,6 +1462,158 @@ class PowerFxRuntime:
         # CluedIn entities also reach Python flattened, with vocabulary keys
         # as top-level keys.
         return get_member(entity, key)
+
+    @staticmethod
+    def is_match(text: str, pattern: str, options: str) -> bool:
+        """
+        Implements `IsMatch`, which matches the whole text by default.
+
+        Args:
+            text (str): The text to test.
+            pattern (str): A regular expression.
+            options (str): Comma-separated options: `Complete` (the default),
+                `Contains`, `BeginsWith`, `EndsWith`, `IgnoreCase`.
+
+        Returns:
+            bool: True if the text matches.
+
+        Raises:
+            PowerFxError: If an option or the pattern is not supported.
+        """
+        flags = 0
+        mode = 'complete'
+        for option in (o.strip().lower() for o in options.split(',') if o.strip()):
+            if option in ('matchoptions.ignorecase', 'ignorecase'):
+                flags |= re.IGNORECASE
+            elif option in ('matchoptions.contains', 'contains'):
+                mode = 'contains'
+            elif option in ('matchoptions.beginswith', 'beginswith'):
+                mode = 'beginswith'
+            elif option in ('matchoptions.endswith', 'endswith'):
+                mode = 'endswith'
+            elif option in ('matchoptions.complete', 'complete'):
+                mode = 'complete'
+            else:
+                raise PowerFxError(f'Unsupported IsMatch option: {option!r}')
+
+        try:
+            if mode == 'contains':
+                return re.search(pattern, text, flags) is not None
+            if mode == 'beginswith':
+                return re.match(pattern, text, flags) is not None
+            if mode == 'endswith':
+                return re.search(f'(?:{pattern})$', text, flags) is not None
+            return re.fullmatch(pattern, text, flags) is not None
+        except re.error as exc:
+            raise PowerFxError(
+                f'Invalid regular expression {pattern!r}: {exc}') from exc
+
+    @staticmethod
+    def to_boolean(value: Any) -> Optional[bool]:
+        """
+        Implements `Boolean`, which reads text and numbers as true or false.
+
+        Args:
+            value: The value to convert.
+
+        Returns:
+            bool: The converted value, or None for Blank().
+
+        Raises:
+            PowerFxError: If the text is not a boolean.
+        """
+        if value is None or value == '':
+            return None
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value != 0
+        text = to_text(value).strip().lower()
+        if text in ('true', '1'):
+            return True
+        if text in ('false', '0'):
+            return False
+        raise PowerFxError(f'Value {value!r} is not a boolean')
+
+    @staticmethod
+    def date_add(value, number: int, unit: str):
+        """
+        Implements `DateAdd(date, number, [unit])`.
+
+        Args:
+            value: The date or datetime to add to.
+            number (int): How many units to add.
+            unit (str): days, months, quarters, years, hours, minutes,
+                seconds or milliseconds.
+
+        Returns:
+            date or datetime: The shifted value.
+
+        Raises:
+            PowerFxError: If the unit is not supported.
+        """
+        deltas = {
+            'day': 'days', 'days': 'days',
+            'hour': 'hours', 'hours': 'hours',
+            'minute': 'minutes', 'minutes': 'minutes',
+            'second': 'seconds', 'seconds': 'seconds',
+            'millisecond': 'milliseconds', 'milliseconds': 'milliseconds',
+        }
+        if unit in deltas:
+            if deltas[unit] != 'days' and not isinstance(value, datetime):
+                value = datetime(value.year, value.month, value.day)
+            return value + timedelta(**{deltas[unit]: number})
+
+        if unit in ('month', 'months', 'quarter', 'quarters', 'year', 'years'):
+            if unit in ('quarter', 'quarters'):
+                number *= 3
+            if unit in ('year', 'years'):
+                months = value.month - 1
+                year = value.year + number
+            else:
+                total = (value.year * 12) + (value.month - 1) + number
+                year, months = divmod(total, 12)
+            month = months + 1
+            # Clamp to the end of a shorter month, as Power Fx does: 31 Jan
+            # plus one month is 28 or 29 Feb.
+            day = min(value.day, _days_in_month(year, month))
+            return value.replace(year=year, month=month, day=day)
+
+        raise PowerFxError(f'Unsupported DateAdd unit: {unit!r}')
+
+    @staticmethod
+    def date_part(part: str, args: list):
+        """
+        Implements `Year`, `Month`, `Day`, `Hour`, `Minute`, `Second` and
+        `Weekday`.
+
+        Args:
+            part (str): Which part to read.
+            args (list): The evaluated arguments.
+
+        Returns:
+            int: The requested part.
+
+        Raises:
+            PowerFxError: If a Weekday start day is not supported.
+        """
+        value = to_date(args[0])
+
+        if part == 'weekday':
+            # Power Fx numbers the week from Sunday by default.
+            start = int(to_number(args[1])) if len(args) == 2 else 1
+            if start == 1:
+                return (value.isoweekday() % 7) + 1
+            if start == 2:
+                return value.isoweekday()
+            raise PowerFxError(f'Unsupported Weekday start day: {start}')
+
+        if part in ('hour', 'minute', 'second'):
+            if not isinstance(value, datetime):
+                return 0
+            return getattr(value, part)
+
+        return getattr(value, part)
 
     @staticmethod
     def date_diff(args: list) -> int:

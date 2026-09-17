@@ -20,19 +20,16 @@ real rule available while building this was
 
 These produce wrong output rather than an error, so they fail silently.
 
-- [ ] **`Text()` with a .NET numeric format returns garbage.** Verified:
-  `Text(1234.5, "0.00")` returns `'1e+03'`, because the format string is handed
-  to Python's `format()`, which reads `0.00` as its own spec. `Text(1234.5, "N2")`
-  returns `'1234.5'` — the exception path swallows it and falls back to plain
-  text. Date formats are translated properly; numeric ones are not. Either
-  implement the .NET numeric formats (`N`, `C`, `P`, `F`, `0.00`, `#,##0`) or
-  raise `PowerFxError` for a numeric format rather than emitting a wrong number.
-  See `format_value` in `powerfx.py`.
+- [ ] **Number parsing and formatting are invariant-culture only.** `Value` now
+  reads group separators, percentages and accounting negatives, and `Text`
+  implements the .NET numeric formats — but both assume `,` groups and `.` is
+  the decimal separator. A European-locale value such as `"1.000,50"` reads as
+  1.0, not 1000.5. Power Fx is locale-aware. Establish which locale CluedIn
+  evaluates rules under before adding one.
 
-- [ ] **`Value()` does not accept group separators.** Verified:
-  `Value("1,000")` raises. CluedIn properties arriving as formatted text will
-  fail a numeric comparison instead of comparing. Locale is also unhandled —
-  Power Fx reads `"1.000,50"` under a European locale.
+- [ ] **`Text()` rejects the currency format `C`.** It raises `PowerFxError`
+  rather than guessing a currency symbol, which would depend on a locale we do
+  not know. Add it once the locale question above is settled.
 
 - [ ] **Text comparison case sensitivity is inconsistent within one rule.**
   Verified: Power Fx `=` here is case-sensitive (`"ABC" = "abc"` is `False`),
@@ -58,9 +55,15 @@ trusted.
   never read. Establish what CluedIn does with an inactive child rule — this
   currently applies actions CluedIn may not.
 
-- [ ] **Rule `order` is ignored.** Verified: `RuleProcessor.prepare` preserves
-  input order and does not sort by `order`. CluedIn applies rules in order, and
-  since actions mutate the record, order changes the result. Confirm and sort.
+- [ ] **Rule `order` is ignored, and cannot currently be honoured.** Verified:
+  the `getRule` query in `rules.py` does not request `order`, so a rule fetched
+  in full has no `order` field and `RuleProcessor.order` is always 0 — sorting
+  by it today would be a no-op. The `getRules` list query does request it.
+  Fixing this means adding `order` to the `getRule` selection set, which was not
+  attempted because a field the schema does not have fails the whole query and
+  there was no schema to check against. Since actions mutate the record, order
+  changes the result. **Check the schema, add the field, then sort in
+  `prepare`.**
 
 - [ ] **Only the `Entity` scope is exercised.** The one real rule is
   `scope: "Entity"`. `DataPart` and `Survivorship` rules may present a different
@@ -80,27 +83,25 @@ trusted.
 
 ## 3. Missing Power Fx functions
 
-Verified by probing: every name below raises `Unsupported Power Fx function`.
-A rule using any of them cannot run here. Listed by how likely they are to turn
-up in a real CluedIn rule.
+The scalar functions are now implemented. What remains needs either a value
+model this engine does not have, or a decision.
 
-- [ ] **Likely needed:** `IsMatch` (regex — CluedIn rules already have
-  match-pattern operators), `Switch`, `IfError`, `IsError`, `Find`,
-  `DateAdd`, `Year`, `Month`, `Day`, `Split`.
-- [ ] **Arithmetic:** `Sum`, `Max`, `Min`, `Average`, `Int`, `Trunc`, `Mod`,
-  `Power`, `Sqrt`, `Rand`.
-- [ ] **Date/time:** `Time`, `Hour`, `Minute`, `Second`, `Weekday`.
-- [ ] **Text:** `Char`, `EncodeUrl`, `Concat` (the table form, distinct from the
-  supported `Concatenate`).
-- [ ] **Type conversion:** `Boolean`, `JSON`.
-- [ ] **Table functions:** `Filter`, `Sort`, `ForAll`, `Search`, `First`, `Last`,
-  `Index`, `Distinct`, `Table`, `Shuffle`, `With`. These need a table/record
-  value model that does not exist here — a larger piece of work than the scalar
-  functions above, and only worth it if CluedIn rules actually use them.
+- [ ] **Table functions:** `Filter`, `Sort`, `ForAll`, `Search`, `First`,
+  `Last`, `Index`, `Distinct`, `Table`, `Shuffle`, `Concat` (the table form,
+  distinct from the supported `Concatenate`). These need a table/record value
+  model and a scope for `ThisRecord`, which is a real piece of work rather than
+  a function each. `Split` is the one exception: it returns a plain Python list,
+  which comparisons and `CountRows` already understand.
+- [ ] **`Time`.** Needs a time-of-day value type; the engine has dates and
+  datetimes only.
+- [ ] **`JSON`.** Needs a decision on what a serialized CluedIn entity should
+  look like.
+- [ ] **`Rand`, `RandBetween`, `GUID`.** Deliberately absent: a non-deterministic
+  rule cannot be reproduced or tested. Add only if a real rule needs one.
 
-The supported set is declared in `PowerFxRuntime.FUNCTIONS` and verified to
-match what `call()` dispatches (checked; no drift today). There is no test
-enforcing that, so the two can drift — worth adding one.
+The supported set is declared in `PowerFxRuntime.FUNCTIONS`, and a test now
+asserts that every declared name is actually dispatched, so the list and the
+implementation cannot drift apart.
 
 ## 4. Missing Power Fx language features
 
@@ -112,10 +113,11 @@ enforcing that, so the two can drift — worth adding one.
   that syntax.
 - [ ] **`ThisRecord`, `ThisItem`, `Self`.** Verified: rejected. Only names rooted
   at `Entity` resolve.
-- [ ] **No error value model.** Power Fx has a first-class Error that flows
-  through an expression and is caught by `IfError`/`IsError`. Here an error is a
-  raised `PowerFxError`, catchable only by `IsBlankOrError`. Verified:
-  `1/0 = 1` raises rather than producing an error value.
+- [ ] **No error *value* model.** `IfError`, `IsError` and `IsBlankOrError` now
+  catch errors, which covers the practical uses. But an error is still a raised
+  `PowerFxError`, not a value that flows through an expression, so `1/0 = 1`
+  raises instead of producing an error. Only matters if a rule relies on an
+  error propagating through arithmetic.
 - [ ] **No named formulas, `Set`, `UpdateContext`, or variables.** Expression-only
   by design; noted so the limit is explicit.
 
@@ -161,11 +163,6 @@ enforcing that, so the two can drift — worth adding one.
 
 ## 7. Ergonomics and performance
 
-- [ ] **`explain()` output is not runnable when a rule uses Power Fx.** It emits
-  `@powerfx(<formula>)` inside the pandas query string. Deliberate — dropping the
-  condition would make the explanation quietly wrong — but it means the result
-  cannot be passed to `df.query`. A caller wanting a runnable query needs a way
-  to ask whether a rule is translatable. Consider a `can_explain()` predicate.
 - [ ] **`RuleProcessor.apply_all` deep-copies twice per rule per object.** Once
   for the result and once per rule for atomicity. Fine for a notebook, wasteful
   for a large batch. A copy-on-write or a rollback journal would avoid it.

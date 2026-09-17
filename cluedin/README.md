@@ -217,6 +217,7 @@ caps the number of requests, so a server that ignores `pageNumber` cannot loop f
   - `cluedin.rules.get_matching_objects(self, objects) -> list` – returns a list of objects that match the rule.
   - `cluedin.rules.object_matches_rules(self, obj) -> bool` – returns `True` if an object matches the rule.
   - `cluedin.rules.explain(self) -> str` – returns an explanation of the rule (in pandas `DataFrame.query` terms).
+  - `cluedin.rules.can_explain(self) -> bool` – returns `False` if the rule contains a Power Fx condition, which has no pandas equivalent, so `explain()` cannot produce a runnable query.
 
 #### Operators
 
@@ -320,11 +321,24 @@ Supported in a formula:
 - literals: text, numbers, `true`, `false`, `Blank()`
 - `Entity`, `Entity.Name`, nested members, and `'quoted names'`
 - operators: `=`, `<>`, `<`, `<=`, `>`, `>=`, `+`, `-`, `*`, `/`, `&`, `in`, `exactin`, `And`/`&&`, `Or`/`||`, `Not`/`!`
-- functions: `Abs`, `And`, `Blank`, `Coalesce`, `Concatenate`, `CountRows`, `DateDiff`, `DateTimeValue`, `DateValue`, `EndsWith`, `GetVocabularyKeyValue`, `If`, `IsBlank`, `IsBlankOrError`, `IsEmpty`, `Left`, `Len`, `LoadEntityByEntityCode`, `Lower`, `Mid`, `Not`, `Now`, `Or`, `Proper`, `Replace`, `Right`, `Round`, `StartsWith`, `Substitute`, `Text`, `Today`, `Trim`, `Upper`, `Value`
+- text: `Char`, `Concatenate`, `EncodeUrl`, `EndsWith`, `Find`, `Left`, `Len`, `Lower`, `Mid`, `Proper`, `Replace`, `Right`, `Split`, `StartsWith`, `Substitute`, `Text`, `Trim`, `Upper`
+- numbers: `Abs`, `Average`, `Int`, `Max`, `Min`, `Mod`, `Power`, `Round`, `Sqrt`, `Sum`, `Trunc`, `Value`
+- dates: `DateAdd`, `DateDiff`, `DateTimeValue`, `DateValue`, `Day`, `Hour`, `Minute`, `Month`, `Now`, `Second`, `Today`, `Weekday`, `Year`
+- logic: `And`, `Blank`, `Boolean`, `Coalesce`, `If`, `IfError`, `IsBlank`, `IsBlankOrError`, `IsEmpty`, `IsError`, `IsMatch`, `Not`, `Or`, `Switch`
+- CluedIn: `CountRows`, `GetVocabularyKeyValue`, `LoadEntityByEntityCode`
 
 A vocabulary key holding several values compares with ANY semantics, except `<>`, which holds only
-if every value differs. `If`, `And`, `Or` and `Coalesce` evaluate their arguments lazily, as Power
-Fx does. Anything outside this subset raises `PowerFxError`.
+if every value differs. `If`, `Switch`, `And`, `Or`, `Coalesce`, `IfError` and `IsError` evaluate
+their arguments lazily, as Power Fx does. Anything outside this subset raises `PowerFxError`.
+
+Numbers follow Power Fx rather than Python: `Round` rounds half away from zero (`Round(2.5)` is 3,
+not Python's 2), `Text` implements the .NET numeric formats (`N2`, `#,##0.00`, `D3`, `P1`, …) and
+raises on one it cannot honour rather than emitting a wrong number, and `Value` reads group
+separators, percentages and accounting negatives. Invariant culture only — a European-locale
+`"1.000,50"` is not understood.
+
+`Split` returns a Python list rather than a Power Fx table, which comparisons and `CountRows`
+already understand. The table functions (`Filter`, `ForAll`, `Sort`, …) are not supported.
 
 #### Actions
 

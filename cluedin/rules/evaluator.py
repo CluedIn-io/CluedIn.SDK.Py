@@ -309,5 +309,24 @@ class Evaluator:
     def explain(self) -> str:
         """
         Generates a pandas query string based on the rules.
+
+        A Power Fx condition has no pandas equivalent and is emitted as
+        `@powerfx(<formula>)`, which pandas cannot run. Use `can_explain` to
+        check before passing the result to `DataFrame.query`.
         """
         return f"df.query('{self.__explain_rule_group(self.rule_group)}')"
+
+    def can_explain(self) -> bool:
+        """
+        Checks whether `explain` produces a query pandas can actually run.
+
+        Returns:
+            bool: False if any condition is a Power Fx formula, which has no
+                pandas equivalent.
+        """
+        def is_translatable(rule_object) -> bool:
+            if "rules" in rule_object and len(rule_object["rules"]) > 0:
+                return all(map(is_translatable, rule_object["rules"]))
+            return get_powerfx_formula(rule_object) is None
+
+        return all(map(is_translatable, self.rule_group.rules))

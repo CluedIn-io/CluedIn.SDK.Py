@@ -96,6 +96,20 @@ class TestPowerFxCondition:
 
         assert len(result) == 1
 
+    def test_can_explain_is_false_for_a_powerfx_rule(self):
+        rule = cluedin.json.load(FIXTURE)
+        evaluator = cluedin.rules.Evaluator(
+            rule['data']['management']['rule']['condition'])
+
+        assert evaluator.can_explain() is False
+
+    def test_can_explain_is_true_for_an_ordinary_rule(self):
+        rule = cluedin.json.load('tests/fixtures/rules/adult-movies.json')
+        evaluator = cluedin.rules.Evaluator(
+            rule['data']['management']['rule']['condition'])
+
+        assert evaluator.can_explain() is True
+
     def test_explain_keeps_the_formula_visible(self):
         rule = cluedin.json.load(FIXTURE)
         evaluator = cluedin.rules.Evaluator(

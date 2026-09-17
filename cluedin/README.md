@@ -180,8 +180,32 @@ entities = cluedin.gql.entries(context, query, variables):
 ### Rules
 
 - `cluedin.rules.RuleScope` - an enumeration of rule scopes: `DATA_PART`, `ENTITY`, `SURVIVORSHIP`.
-- `cluedin.rules.get_rules(context: Context, scope=RuleScope.DATA_PART) -> dict` – returns all rules for a given scope. This method returns a JSON-response serialized into a `dict`.
+- `cluedin.rules.get_rules(context: Context, scope=RuleScope.DATA_PART, page_number=1, search_name=None, is_active=None, sort_by=None, sort_direction=None) -> dict` – returns **one page** of rules for a given scope. This method returns a JSON-response serialized into a `dict`.
+- `cluedin.rules.get_all_rules(context: Context, scope=RuleScope.DATA_PART, max_pages=1_000, **kwargs) -> Generator` – returns every rule in a scope, walking the pages. This function is a generator.
 - `cluedin.rules.get_rule(context: Context, rule_id: str) -> dict` – returns a rule by ID. This method returns a JSON-response serialized into a `dict`.
+- `cluedin.rules.get_all_rule_details(context: Context, scope=RuleScope.DATA_PART, **kwargs) -> Generator` – returns every rule in a scope in full, with its condition and actions. This function is a generator.
+- `cluedin.rules.get_rules_page(response: dict) -> dict` – pulls the rules page out of a `get_rules` response, raising `ValueError` on a GraphQL error rather than a `KeyError` far from the cause.
+
+The server decides the page size and currently returns 20 rules per page, so a scope holding more
+than that needs several calls. `get_rules` returns a single page; `get_all_rules` walks them:
+
+```python
+rules = list(cluedin.rules.get_all_rules(context, RuleScope.ENTITY))
+
+len(rules)  # every rule in the scope, not just the first 20
+```
+
+Rule summaries carry no condition or actions. To get rules ready to evaluate or apply, use
+`get_all_rule_details`, which follows each summary with a `get_rule` call – one request per rule:
+
+```python
+rules = list(cluedin.rules.get_all_rule_details(context, RuleScope.ENTITY))
+
+processors, skipped = cluedin.rules.RuleProcessor.prepare(rules)
+```
+
+Both generators are lazy, so `next()` or a `break` fetches only the pages it reaches. `max_pages`
+caps the number of requests, so a server that ignores `pageNumber` cannot loop forever.
 
 #### Evaluator
 

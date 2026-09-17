@@ -1,13 +1,14 @@
-# Power Fx rule execution — known gaps
+# Rule execution outside CluedIn — known gaps
 
-What is missing, unverified, or wrong in the Power Fx support added to
-`cluedin/rules/` (`powerfx.py`, `actions.py`, `processor.py`).
+What is missing, unverified, or wrong in the rule support added to
+`cluedin/rules/` (`powerfx.py`, `actions.py`, `processor.py`, and the
+pagination helpers in `rules.py`).
 
-The goal of that work is to run CluedIn rules outside CluedIn. Everything below
-is a way in which a rule that CluedIn executes may not execute here, or may
-execute differently. Each item says how it was established: **verified** means
-reproduced against this code, **unverified** means it depends on CluedIn
-behaviour we have not confirmed.
+The goal of that work is to retrieve CluedIn rules and run them outside
+CluedIn. Everything below is a way in which a rule that CluedIn executes may
+not execute here, or may execute differently. Each item says how it was
+established: **verified** means reproduced against this code, **unverified**
+means it depends on CluedIn behaviour we have not confirmed.
 
 Status: conditions and actions run for the rule shapes we have seen. The single
 real rule available while building this was
@@ -137,7 +138,28 @@ enforcing that, so the two can drift — worth adding one.
   tests over fixtures. The existing `@pytest.mark.integration` tests would be the
   place for a real round-trip.
 
-## 6. Ergonomics and performance
+## 6. Rule retrieval
+
+- [ ] **Page size cannot be controlled.** Verified: the GraphQL query in
+  `rules.py` declares `$searchName`, `$isActive`, `$pageNumber`, `$sortBy`,
+  `$sortDirection` and `$scope` — but no `$pageSize`. The server serves 20 rules
+  per page. `get_all_rules` works around this by walking pages, which costs one
+  request per 20 rules. If the `management.rules` schema accepts a page size,
+  adding `$pageSize: Int` to the query would collapse most scopes to a single
+  request. Not attempted: the postman collection does not contain this query, so
+  there was no way to confirm the argument exists, and guessing would break the
+  query outright. **Check the schema.**
+
+- [ ] **`get_all_rule_details` makes one request per rule.** Unavoidable with
+  the current API — rule summaries carry no condition or actions, so each needs
+  its own `get_rule`. If a bulk endpoint exists, use it.
+
+- [ ] **No integration test for pagination.** The tests fake the GraphQL layer,
+  so they prove the paging logic but not that the server behaves as assumed
+  (20 per page, `total` accurate, `pageNumber` honoured). A tenant with more
+  than 20 rules in a scope would confirm it.
+
+## 7. Ergonomics and performance
 
 - [ ] **`explain()` output is not runnable when a rule uses Power Fx.** It emits
   `@powerfx(<formula>)` inside the pandas query string. Deliberate — dropping the
@@ -151,7 +173,7 @@ enforcing that, so the two can drift — worth adding one.
   equivalent for Power Fx conditions, which is what `explain()` exists for with
   ordinary conditions.
 
-## 7. Repository
+## 8. Repository
 
 - [ ] **Version drift.** This repo (`CluedIn-io/CluedIn.SDK.Py`) is at **3.0.1**,
   while the `cluedin` package on PyPI is at **4.0.1**, published from

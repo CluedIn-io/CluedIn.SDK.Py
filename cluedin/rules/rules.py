@@ -65,7 +65,6 @@ def get_rules(
                         isActive
                         createdBy
                         modifiedBy
-                        ownedBy
                         createdAt
                         modifiedAt
                         author {
@@ -75,6 +74,9 @@ def get_rules(
                         }
                         scope
                         isReprocessing
+                        requiresAttention
+                        hasFailed
+                        affectedRecords
                         __typename
                     }
                     __typename
@@ -225,7 +227,6 @@ def get_rule(context: Context, rule_id: str) -> dict:
                     isActive
                     createdBy
                     modifiedBy
-                    ownedBy
                     createdAt
                     modifiedAt
                     condition
@@ -245,6 +246,8 @@ def get_rule(context: Context, rule_id: str) -> dict:
                     scope
                     isReprocessing
                     requiresAttention
+                    hasFailed
+                    affectedRecords
                     __typename
                 }
                 __typename

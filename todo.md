@@ -14,6 +14,10 @@ Status: conditions and actions run for the rule shapes we have seen. The single
 real rule available while building this was
 `tests/fixtures/rules/powerfx.json`.
 
+There is no test covering the GraphQL queries themselves. A stale field in a
+query is invisible offline and surfaces only as a 400 from a live tenant, which
+is how the `ownedBy` breakage was found. See section 6.
+
 ---
 
 ## 1. Correctness bugs
@@ -172,6 +176,13 @@ implementation cannot drift apart.
   (20 per page, `total` accurate, `pageNumber` honoured). A tenant with more
   than 20 rules in a scope would confirm it.
 
+- [ ] **Nothing validates the GraphQL queries against the live schema.** The
+  `getRules` and `getRule` queries requested `ownedBy`, which the API had
+  removed, so every call returned 400 — invisible to the offline tests, which
+  never send a query. An integration test that simply runs each query against a
+  tenant would have caught it. Worth adding alongside the pagination test above,
+  since both need the same live tenant.
+
 ## 7. Ergonomics and performance
 
 - [ ] **`RuleProcessor.apply_all` deep-copies twice per rule per object.** Once
@@ -183,10 +194,14 @@ implementation cannot drift apart.
 
 ## 8. Repository
 
-- [ ] **Version drift.** This repo (`CluedIn-io/CluedIn.SDK.Py`) is at **3.0.1**,
-  while the `cluedin` package on PyPI is at **4.0.1**, published from
-  `romaklimenko/cluedin`. This work sits on the older base. Resolve before
-  publishing, or the 4.0.x changes get clobbered.
+- [ ] **Version number is behind, but the code is not.** This repo says
+  **3.0.1** while the `cluedin` package on PyPI is **4.0.1**. Comparing the two
+  package trees showed that the *only* code difference between 4.0.1 and this
+  repo's `main` was the two rules queries — the `ownedBy` field 4.0.1 dropped and
+  the `requiresAttention`/`hasFailed`/`affectedRecords` fields it added. That is
+  now fixed here, so every module is byte-identical to 4.0.1 apart from the
+  Power Fx work. Only the version in `pyproject.toml` still needs deciding
+  before publishing.
 
 ---
 

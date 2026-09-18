@@ -207,6 +207,170 @@ processors, skipped = cluedin.rules.RuleProcessor.prepare(rules)
 Both generators are lazy, so `next()` or a `break` fetches only the pages it reaches. `max_pages`
 caps the number of requests, so a server that ignores `pageNumber` cannot loop forever.
 
+#### Running rules outside CluedIn
+
+A CluedIn rule is a condition and a set of actions. This SDK can retrieve both and execute them in
+Python, against a `dict` rather than a live entity, which makes it possible to preview what a rule
+would do, test a rule against sample records before activating it, or apply the same logic to data
+that has not been ingested yet.
+
+The workflow is: retrieve the rules in full, turn them into processors, then apply them.
+
+```python
+import os
+
+import cluedin
+from cluedin.rules import RuleProcessor, RuleScope, get_all_rule_details
+
+context = cluedin.Context.from_json_file(os.environ['CLUEDIN_CONTEXT'])
+context.get_token()
+
+# 1. Retrieve every rule in the scope, with its condition and actions.
+rules = list(get_all_rule_details(context, RuleScope.ENTITY))
+
+# 2. Turn them into executable rules. Anything this SDK cannot run is
+#    reported instead of being half-applied.
+processors, skipped = RuleProcessor.prepare(rules)
+
+print(f'executable: {len(processors)}   skipped: {len(skipped)}')
+
+for rule in skipped:
+    print(f'SKIPPED {rule["name"]}: {rule["reason"]}')
+
+# 3. Apply them to a record.
+record = {
+    'entityType': '/DPerson',
+    'golden.person.firstName': 'Smith',
+    'golden.person.lastName': 'Smith',
+}
+
+result = RuleProcessor.apply_all(record, processors)
+
+print(result)
+# {'entityType': '/DPerson', 'golden.person.firstName': 'New Name',
+#  'golden.person.lastName': 'Smith'}
+```
+
+`apply_all` works on a copy, so `record` is left untouched. Each rule is applied atomically: if
+one fails, its changes are discarded and the remaining rules still run. Pass `on_error` to see
+which failed:
+
+```python
+errors = []
+
+result = RuleProcessor.apply_all(
+    record, processors, on_error=lambda processor, exc: errors.append((processor.name, exc)))
+```
+
+A single rule can be inspected on its own, which is usually what you want while working out why a
+record did or did not change:
+
+```python
+for processor in processors:
+    if processor.matches(record):
+        print('matched:', processor.name)
+```
+
+##### The record shape
+
+Rules address fields by vocabulary key. A record is a flat `dict` keyed by those vocabulary keys,
+which is what `cluedin.gql.entries(..., flat=True)` and `cluedin.gql.search` already return, so
+entities can be piped straight in:
+
+```python
+entities = cluedin.gql.search(context, 'entityType:/DPerson', page_size=1_000)
+
+changed = []
+
+for entity in entities:
+    after = RuleProcessor.apply_all(entity, processors)
+    if after != entity:
+        changed.append((entity.get('name'), after))
+```
+
+Nothing is written back to CluedIn – applying a rule here only produces a new `dict`.
+
+A record nested under a `Properties` mapping, the shape `get_rule` responses use, works too. For
+anything else, pass `get_value` to map a vocabulary key onto your own field names:
+
+```python
+def get_value(field, obj):
+    for part in field.split('.'):
+        obj = obj.get(part) if isinstance(obj, dict) else None
+        if obj is None:
+            return None
+    return obj
+
+processors, skipped = RuleProcessor.prepare(
+    rules, evaluator_kwargs={'get_value': get_value})
+```
+
+##### Finding the rules that use Power Fx
+
+A rule expresses its condition either as field/operator/value triples or as a Power Fx formula,
+and its actions either as typed actions or as a Formula Action. To see which rules use which:
+
+```python
+from cluedin.rules import get_powerfx_formula
+from cluedin.rules.actions import EXPRESSION_ACTION, get_action_properties
+
+
+def find_powerfx(rule):
+    """Returns the Power Fx conditions and actions a rule uses."""
+    model = rule['data']['management']['rule']
+    formulas = []
+
+    def walk(condition):
+        formula = get_powerfx_formula(condition)
+        if formula:
+            formulas.append(formula)
+        for child in condition.get('rules') or []:
+            walk(child)
+
+    walk(model.get('condition') or {})
+
+    expressions = [
+        get_action_properties(action).get('Expression')
+        for processing_rule in model.get('rules') or []
+        for action in processing_rule.get('actions') or []
+        if action.get('type') == EXPRESSION_ACTION
+    ]
+    return formulas, expressions
+
+
+for rule in rules:
+    conditions, actions = find_powerfx(rule)
+    if conditions or actions:
+        print(rule['data']['management']['rule']['name'])
+        for formula in conditions:
+            print('  condition:', formula)
+        for expression in actions:
+            print('  action   :', expression)
+```
+
+##### What gets skipped, and why
+
+`RuleProcessor.prepare` builds a processor only for a rule it can execute completely. A rule using
+an unsupported action type, an unsupported operator, or a Formula Action verb that has no meaning
+outside CluedIn is reported in `skipped` with the reason, and never partially applied:
+
+```text
+executable: 42   skipped: 4
+SKIPPED Grant - recipient reference: ActionError: Unsupported rule action:
+CluedIn.Rules.Actions.SomeAction, CluedIn.Rules
+```
+
+This is deliberate. A rule that half-runs would produce a record that neither matches CluedIn nor
+is obviously wrong. See [Actions](#actions) for how to add support for an action type or a
+statement function this SDK does not handle.
+
+##### Cost
+
+`get_all_rules` makes one request per page of 20 rules. `get_all_rule_details` additionally makes
+one `get_rule` request per rule, because a rule summary carries no condition or actions – so a
+scope of 46 rules costs 3 + 46 requests. Retrieve once and reuse the processors; building them
+does no I/O.
+
 #### Evaluator
 
 - `cluedin.rules.evaluator.default_get_property_name(field: str) -> str` – returns a default property name for a given field. Used to map CluedIn Rules fields to your fields.

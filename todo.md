@@ -136,6 +136,17 @@ implementation cannot drift apart.
   `SetValue`, `AddTag`, `ExpressionAction`. CluedIn has more, and we have no
   list. Anything else raises `ActionError` and the rule is reported as skipped —
   correct behaviour, but the coverage is unknown. Get the full action type list.
+
+- [ ] **Entity-level statement functions are not supported, by design.**
+  `SetEntityName`, `SetEntityType`, `RemoveTag`, `AddAlias`, `AddEntityCode`,
+  `RemoveEntityCode`, `AddEdge`, `RemoveEdge` and anything else that reaches
+  into CluedIn's entity model rather than its properties. Rules here run against
+  a plain JSON object, which carries no codes, aliases, edges or entity type, so
+  there is nothing meaningful for them to modify. They are rejected when the
+  formula is parsed, so `RuleProcessor.prepare` reports the rule instead of it
+  failing mid-batch, and a caller who does model them can subclass
+  `ExpressionActionRuntime` and pass it as `runtime_class`. Revisit only if a
+  richer entity representation is added.
 - [ ] **No integration test against a live tenant.** All Power Fx tests are unit
   tests over fixtures. The existing `@pytest.mark.integration` tests would be the
   place for a real round-trip.

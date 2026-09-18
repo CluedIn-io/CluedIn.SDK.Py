@@ -1,6 +1,7 @@
 import pytest
 
 from cluedin.rules.actions import (ActionError, CompiledExpressionAction,
+                                   ExpressionActionRuntime,
                                    default_get_action)
 from cluedin.rules.powerfx import PowerFxError
 
@@ -118,9 +119,36 @@ class TestExpressionAction:
         with pytest.raises((ActionError, PowerFxError)):
             CompiledExpressionAction(expression)
 
-    def test_unsupported_statement_function_raises(self):
-        with pytest.raises(PowerFxError):
-            CompiledExpressionAction('DeleteEverything(Entity)').apply({})
+    @pytest.mark.parametrize('function', [
+        'DeleteEverything',
+        # Functions that reach into CluedIn's entity model have no equivalent
+        # when a rule runs against a plain object.
+        'SetEntityName', 'SetEntityType', 'RemoveTag', 'AddAlias',
+        'AddEntityCode',
+    ])
+    def test_unsupported_statement_function_is_rejected_when_parsed(self, function):
+        # Parse time, not apply time, so RuleProcessor.prepare can report the
+        # rule instead of it failing partway through a batch.
+        with pytest.raises(ActionError, match='Unsupported expression action'):
+            CompiledExpressionAction(f'{function}(Entity,"x")')
+
+    def test_a_subclass_can_add_a_statement_function(self):
+        class Extended(ExpressionActionRuntime):
+            # pylint: disable=missing-docstring
+            STATEMENTS = ExpressionActionRuntime.STATEMENTS + ('SetEntityName',)
+
+            def call(self, name, args):
+                if name.lower() == 'setentityname':
+                    args[0]['name'] = args[1]
+                    return args[1]
+                return super().call(name, args)
+
+        entity = {'name': 'Old'}
+
+        CompiledExpressionAction(
+            'SetEntityName(Entity,"New")', Extended).apply(entity)
+
+        assert entity['name'] == 'New'
 
 
 class TestStandardActions:

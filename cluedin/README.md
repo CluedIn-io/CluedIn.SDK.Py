@@ -352,14 +352,73 @@ Supported action types:
 - `CluedIn.Rules.Actions.SetValue` – sets a property to a constant.
 - `CluedIn.Rules.Actions.AddTag` – appends to the object's `tags` list.
 - `CluedIn.Rules.Actions.ExpressionAction` – runs a Formula Action, for example
-  `SetVocabularyKeyValue(Entity,"golden.person.firstName","New Name")`. Statement functions:
-  `SetVocabularyKeyValue`, `SetEntityProperty`, `RemoveVocabularyKey`, `AddTag`. Their value
-  arguments are ordinary Power Fx expressions, so an action can read the entity it is modifying.
+  `SetVocabularyKeyValue(Entity,"golden.person.firstName","New Name")`. Their value arguments are
+  ordinary Power Fx expressions, so an action can read the entity it is modifying.
+
+##### Formula Action statement functions
+
+| Function | Status |
+| --- | --- |
+| `SetVocabularyKeyValue(Entity, "key", value)` | Supported. Seen in a real CluedIn rule. |
+| `SetEntityProperty(Entity, "name", value)` | Supported. Seen in a real CluedIn rule. |
+| `RemoveVocabularyKey(Entity, "key")` | Supported, but **inferred** – not yet seen in a real rule, so the name is unconfirmed. |
+| `AddTag(Entity, "tag")` | Supported, but **inferred** – `AddTag` is confirmed as an action *type*, not as a formula verb. |
+
+##### Not supported: entity-level functions
+
+Rules run here against a plain JSON object – a `dict` from `cluedin.gql.entries` or one you built
+yourself – not against a live CluedIn entity. A formula that manipulates the entity itself rather
+than its properties therefore has no meaningful target, and is **not supported**:
+
+`SetEntityName`, `SetEntityType`, `RemoveTag`, `AddAlias`, `AddEntityCode`, `RemoveEntityCode`,
+`AddEdge`, `RemoveEdge`, and any other function that reaches into CluedIn's entity model.
+
+This is a deliberate limit, not an oversight. Those functions operate on parts of an entity –
+its codes, aliases, edges, entity type – that a JSON object does not carry, and inventing a
+representation for them would produce a result that does not match what CluedIn would do.
+
+The statement name is checked when the formula is parsed, not when it runs, so `RuleProcessor`
+reports the whole rule while rules are being prepared rather than failing partway through a batch:
+
+```python
+processors, skipped = cluedin.rules.RuleProcessor.prepare(rules)
+
+for rule in skipped:
+    print(f'SKIPPED: {rule["name"]} -> {rule["reason"]}')
+```
+
+```text
+SKIPPED: Rename people -> ActionError: Unsupported expression action function:
+SetEntityName. Supported are AddTag, RemoveVocabularyKey, SetEntityProperty,
+SetVocabularyKeyValue. Functions that modify the entity itself, such as
+SetEntityName or AddEntityCode, have no equivalent when a rule runs against a
+plain object.
+```
+
+If your object does model one of these, add the verb yourself rather than waiting for the SDK.
+Subclass `ExpressionActionRuntime`, extend `STATEMENTS`, handle the name in `call`, and pass the
+subclass as `runtime_class`:
+
+```python
+class MyRuntime(cluedin.rules.actions.ExpressionActionRuntime):
+    STATEMENTS = ExpressionActionRuntime.STATEMENTS + ('SetEntityName',)
+
+    def call(self, name, args):
+        if name.lower() == 'setentityname':
+            args[0]['name'] = args[1]
+            return args[1]
+        return super().call(name, args)
+
+processors, skipped = cluedin.rules.RuleProcessor.prepare(
+    rules, runtime_class=MyRuntime)
+```
+
+The same applies to an unsupported action *type*: pass your own `get_action` and fall back to
+`default_get_action`.
 
 Writes go through `set_value` (`(key, value, obj) -> None`) and `add_tag` (`(tag, obj) -> None`),
 both overridable via `runtime_kwargs`. By default a key is written to the object's `Properties`
-mapping if it has one, and as a top-level key otherwise. To support an action type this SDK does
-not, pass your own `get_action` to `RuleProcessor` and fall back to `default_get_action`.
+mapping if it has one, and as a top-level key otherwise.
 
 ### Vocabulary
 

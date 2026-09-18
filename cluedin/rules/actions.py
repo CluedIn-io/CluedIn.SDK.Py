@@ -189,32 +189,48 @@ class CompiledExpressionAction:
     Args:
         expression (str): The expression from the action's `Expression`
             property.
+        runtime_class (type, optional): The runtime whose `STATEMENTS` the
+            expression is checked against, and which runs it. Defaults to
+            `ExpressionActionRuntime`. Subclass it to support a statement
+            function this SDK does not.
 
     Raises:
         PowerFxError: If the expression is not valid.
-        ActionError: If a statement is not a call to a statement function.
+        ActionError: If a statement is not a call to a supported statement
+            function.
     """
 
-    def __init__(self, expression: str) -> None:
+    def __init__(self, expression: str, runtime_class=None) -> None:
         self.expression = expression
-        self.statements = self.parse_statements(expression)
+        self.runtime_class = runtime_class or ExpressionActionRuntime
+        self.statements = self.parse_statements(expression, self.runtime_class)
 
     @staticmethod
-    def parse_statements(expression: str) -> list:
+    def parse_statements(expression: str, runtime_class=None) -> list:
         """
         Parses `;`-separated statements into a list of AST nodes.
 
+        The statement name is checked here rather than when the action runs,
+        so that an unsupported formula is reported while rules are being
+        prepared instead of failing partway through a batch.
+
         Args:
             expression (str): The expression.
+            runtime_class (type, optional): The runtime whose `STATEMENTS` to
+                accept. Defaults to `ExpressionActionRuntime`.
 
         Returns:
             list: The parsed statement nodes.
 
         Raises:
             PowerFxError: If a statement is not valid.
-            ActionError: If a statement is not a function call. An expression
+            ActionError: If a statement is not a function call, or calls a
+                function that is not a supported statement. An expression
                 action has to do something; a bare value would be discarded.
         """
+        runtime_class = runtime_class or ExpressionActionRuntime
+        supported = {name.lower() for name in runtime_class.STATEMENTS}
+
         parser = Parser(expression)
         statements = []
         while parser.current.kind != 'EOF':
@@ -226,6 +242,13 @@ class CompiledExpressionAction:
                 raise ActionError(
                     f'An expression action must be a function call, '
                     f'got {type(node).__name__} in {expression!r}.')
+            if node.name.lower() not in supported:
+                raise ActionError(
+                    f'Unsupported expression action function: {node.name}. '
+                    f'Supported are {", ".join(runtime_class.STATEMENTS)}. '
+                    'Functions that modify the entity itself, such as '
+                    'SetEntityName or AddEntityCode, have no equivalent when '
+                    'a rule runs against a plain object.')
             statements.append(node)
             if parser.current.kind not in ('SEMICOLON', 'EOF'):
                 raise PowerFxError(
@@ -241,7 +264,7 @@ class CompiledExpressionAction:
 
         Args:
             obj: The object to modify.
-            **runtime_kwargs: Passed to `ExpressionActionRuntime`.
+            **runtime_kwargs: Passed to the runtime.
 
         Returns:
             Any: The modified object.
@@ -249,7 +272,7 @@ class CompiledExpressionAction:
         Raises:
             PowerFxError: If a statement cannot be evaluated.
         """
-        runtime = ExpressionActionRuntime(obj, **runtime_kwargs)
+        runtime = self.runtime_class(obj, **runtime_kwargs)
         for statement in self.statements:
             runtime.evaluate(statement)
         return obj
@@ -312,7 +335,11 @@ def default_get_action(action_json: Mapping, **runtime_kwargs) -> Callable[[Any]
         if not expression or not str(expression).strip():
             raise ActionError(
                 'An ExpressionAction has no Expression property.')
-        compiled = CompiledExpressionAction(str(expression))
+        # runtime_class selects the statement functions; the rest configure
+        # the runtime instance, so it is not passed on to apply().
+        runtime_kwargs = dict(runtime_kwargs)
+        compiled = CompiledExpressionAction(
+            str(expression), runtime_kwargs.pop('runtime_class', None))
 
         def apply_expression(obj):
             return compiled.apply(obj, **runtime_kwargs)

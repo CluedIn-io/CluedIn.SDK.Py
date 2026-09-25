@@ -1,0 +1,115 @@
+{
+  "data": {
+    "management": {
+      "id": "management",
+      "rule": {
+        "id": "aa1129f5-8484-48e1-a4ce-b036be6bd115",
+        "name": "PowerFX rule with condition and action",
+        "description": null,
+        "isActive": true,
+        "createdBy": "5d6f3a8d-5e5a-46e4-8e21-8a17fbf03771",
+        "modifiedBy": "5d6f3a8d-5e5a-46e4-8e21-8a17fbf03771",
+        "isOwner": true,
+        "createdAt": "2026-09-17T20:04:36.0254644+00:00",
+        "modifiedAt": "2026-09-17T20:07:06.6260559+00:00",
+        "condition": {
+          "objectTypeId": "00000000-0000-0000-0000-000000000000",
+          "condition": "AND",
+          "field": null,
+          "id": "6730a5ca-e795-4454-bf27-f0fac9d6017e",
+          "operator": "00000000-0000-0000-0000-000000000000",
+          "rules": [
+            {
+              "objectTypeId": "3be85371-cbe0-4180-8820-73e6e37a6c32",
+              "condition": "AND",
+              "field": "EntityType",
+              "id": "66869038-b345-428f-abc1-bca849b65873",
+              "operator": "0bafc522-8011-43ba-978a-babe222ba466",
+              "rules": [],
+              "type": "string",
+              "value": [
+                "/DPerson"
+              ]
+            },
+            {
+              "objectTypeId": "96102979-e952-43d8-afe6-987676c0698b",
+              "condition": "AND",
+              "field": null,
+              "id": "0e31d28f-4b21-482d-9fb7-59ba7b829ecb",
+              "operator": "00000000-0000-0000-0000-000000000000",
+              "rules": [],
+              "type": null,
+              "value": [
+                "GetVocabularyKeyValue(Entity,\"golden.person.firstName\") = GetVocabularyKeyValue(Entity,\"golden.person.lastName\")"
+              ]
+            }
+          ],
+          "type": null,
+          "value": null
+        },
+        "actions": null,
+        "rules": [
+          {
+            "id": "7771cd46-0fcb-4f4e-b304-d49880b3f0ec",
+            "name": "Set Name",
+            "description": null,
+            "organizationId": "5f6992a2-def0-4e0c-9c0f-d6b1a9cf4127",
+            "type": "ProcessingRule",
+            "order": 1,
+            "createdBy": "5d6f3a8d-5e5a-46e4-8e21-8a17fbf03771",
+            "createdAt": "2026-09-17T20:07:06.6262133+00:00",
+            "modifiedBy": null,
+            "modifiedAt": null,
+            "isActive": false,
+            "conditions": {
+              "objectTypeId": "00000000-0000-0000-0000-000000000000",
+              "condition": "AND",
+              "field": null,
+              "id": "dea64f85-9833-4aae-8bfc-5fed55537249",
+              "operator": "00000000-0000-0000-0000-000000000000",
+              "rules": [],
+              "type": null,
+              "value": null
+            },
+            "actions": [
+              {
+                "supportsProcessingRuleScopes": null,
+                "supportsRuleUsages": null,
+                "name": "Formula Action",
+                "supportsPreview": false,
+                "properties": [
+                  {
+                    "name": "Expression",
+                    "type": "System.String",
+                    "kind": "Expression",
+                    "friendlyType": null,
+                    "friendlyName": "Expression",
+                    "defaultValue": null,
+                    "value": "SetVocabularyKeyValue(Entity,\"golden.person.firstName\",\"New Name\")",
+                    "isStringOnly": false,
+                    "excludedProperties": null,
+                    "isRequired": true
+                  }
+                ],
+                "type": "CluedIn.Rules.Actions.ExpressionAction, CluedIn.Rules"
+              }
+            ]
+          }
+        ],
+        "sourceDetail": null,
+        "author": {
+          "id": "5d6f3a8d-5e5a-46e4-8e21-8a17fbf03771",
+          "username": "ako@cluedin.com",
+          "__typename": "User"
+        },
+        "scope": "Entity",
+        "isReprocessing": false,
+        "requiresAttention": false,
+        "hasFailed": false,
+        "affectedRecords": 0,
+        "__typename": "Rule"
+      },
+      "__typename": "Management"
+    }
+  }
+}

@@ -45,10 +45,18 @@ stages:
               PACKAGE_VERSION=$(python3 -c "
               import json
               d = json.load(open('gitversion.json'))
-              mmp = d['MajorMinorPatch']
+              major, minor, patch = d['Major'], d['Minor'], d['Patch']
               commits = d['CommitsSinceVersionSource']
               label = d.get('PreReleaseLabel') or ''
-              print(f'{mmp}.dev{commits}' if label else mmp)
+              if label:
+                  print(f'{major}.{minor}.{patch}.dev{commits}')
+              else:
+                  # MajorMinorPatch only bumps once per release regardless of how
+                  # many untagged commits share that bump type, so a build whose
+                  # tag push lost a race with another build's would otherwise
+                  # compute the same version. Fold the extra untagged commits
+                  # into the patch number to keep every commit's version unique.
+                  print(f'{major}.{minor}.{patch + max(commits - 1, 0)}')
               ")
               echo "##vso[task.setvariable variable=PackageVersion;isOutput=true]$PACKAGE_VERSION"
               echo "Computed PEP440 version: $PACKAGE_VERSION"
